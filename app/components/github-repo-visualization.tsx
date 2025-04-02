@@ -19,10 +19,34 @@ const CONTRIBUTOR_SPHERE_MAX_RADIUS = 4
 const CONTRIBUTOR_SPHERE_MIN_RADIUS = 0.5
 const CONTRIBUTOR_GRID_SPACING = 8
 // Language Donut
-const DONUT_OUTER_RADIUS = 15
+const DONUT_OUTER_RADIUS = 18       // Larger outer radius for better display
 const DONUT_INNER_RADIUS = 10
-const DONUT_EXTRUDE_DEPTH = 3  // Slightly deeper for better appearance
-const DONUT_LABEL_OFFSET = DONUT_OUTER_RADIUS + 2
+const DONUT_EXTRUDE_DEPTH = 4       // Deeper segments for better 3D effect
+const DONUT_LABEL_OFFSET = 22       // More space for labels
+const DONUT_SEGMENT_SPACING = 0.02  // Small spacing between segments
+const LANGUAGE_COLORS: Record<string, number> = {
+  JavaScript: 0xf7df1e,
+  TypeScript: 0x3178c6,
+  Python: 0x3776ab,
+  Java: 0xb07219,
+  Ruby: 0xcc342d,
+  Go: 0x00add8,
+  Rust: 0xdea584,
+  C: 0x555555,
+  "C++": 0xf34b7d,
+  "C#": 0x178600,
+  PHP: 0x4F5D95,
+  Swift: 0xffac45,
+  Kotlin: 0xA97BFF,
+  Dart: 0x00B4AB,
+  HTML: 0xe34c26,
+  CSS: 0x563d7c,
+  Shell: 0x89e051,
+  Dockerfile: 0x384d54,
+  Markdown: 0x083fa1,
+  YAML: 0xcb171e,
+  JSON: 0x292929,
+}
 // Positioning
 const SIDE_VIS_X_OFFSET = 90 
 const SIDE_VIS_Z_POSITION = -40
@@ -34,7 +58,8 @@ const CAMERA_PRESETS = {
   overview: { position: new THREE.Vector3(30, 40, 80), target: new THREE.Vector3(0, 20, 0) },
   commitHistory: { position: new THREE.Vector3(0, 30, 60), target: new THREE.Vector3(0, 20, 0) },
   languages: { position: new THREE.Vector3(-SIDE_VIS_X_OFFSET - 20, 20, -20), target: new THREE.Vector3(-SIDE_VIS_X_OFFSET, 5, SIDE_VIS_Z_POSITION) },
-  contributors: { position: new THREE.Vector3(SIDE_VIS_X_OFFSET + 20, 20, -20), target: new THREE.Vector3(SIDE_VIS_X_OFFSET, 5, SIDE_VIS_Z_POSITION) }
+  contributors: { position: new THREE.Vector3(SIDE_VIS_X_OFFSET + 20, 20, -20), target: new THREE.Vector3(SIDE_VIS_X_OFFSET, 5, SIDE_VIS_Z_POSITION) },
+  trainPOV: { position: new THREE.Vector3(0, 0, 0), target: new THREE.Vector3(0, 0, 0) } // Placeholder, will be set dynamically
 }
 // Visual Effects
 const PARTICLE_COUNT = 200
@@ -42,9 +67,17 @@ const TIME_RIBBON_WIDTH = 1
 const BLOOM_STRENGTH = 0.8
 const BLOOM_RADIUS = 0.3
 
+// Time Train
+const TRAIN_SIZE = 1.2
+const TRAIN_COLOR = 0xffaa00
+const TRAIN_EMISSION_COLOR = 0xff6600
+const TRAIN_LENGTH = 3
+const HIGHLIGHT_DISTANCE = 2.5 // Distance at which commits get highlighted
+
 interface CommitObject {
   mesh: THREE.Mesh
   data: Commit
+  position: THREE.Vector3
 }
 
 interface GitHubRepoVisualizationProps {
@@ -69,14 +102,42 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
   const [activeView, setActiveView] = useState<string>("overview")
   const particlesRef = useRef<THREE.Points | null>(null)
   const timeRibbonRef = useRef<THREE.Mesh | null>(null)
+  
+  // Time train references
+  const timeTrainRef = useRef<THREE.Group | null>(null)
+  const trainPositionRef = useRef<number>(0)
+  const timeRibbonCurveRef = useRef<THREE.CatmullRomCurve3 | null>(null)
+  const sliderRef = useRef<HTMLInputElement | null>(null)
+  const highlightedCommitRef = useRef<THREE.Mesh | null>(null)
+  const highlightedLabelRef = useRef<CSS2DObject | null>(null)
+  const [trainPosition, setTrainPosition] = useState<number>(0)
+  const sortedCommitsRef = useRef<Commit[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const navContainerRef = useRef<HTMLDivElement | null>(null)
+  const sliderContainerRef = useRef<HTMLDivElement | null>(null)
+  
+  // Add a state for train POV mode
+  const [trainPOVEnabled, setTrainPOVEnabled] = useState<boolean>(false)
 
-  // Initialize the scene
+  // Initialize the scene - back to a simpler approach
   useEffect(() => {
     if (!containerRef.current) return
 
+    // Cleanup previous instance if it exists
+    if (rendererRef.current && containerRef.current) {
+      containerRef.current.removeChild(rendererRef.current.domElement)
+    }
+    if (labelRendererRef.current && containerRef.current) {
+      containerRef.current.removeChild(labelRendererRef.current.domElement)
+    }
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+    }
+
     // Scene
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x0a1929) // Deeper blue background for better contrast
+    scene.background = new THREE.Color(0x0a1929)
     sceneRef.current = scene
 
     // Fog for depth perception
@@ -88,30 +149,30 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     camera.lookAt(CAMERA_PRESETS.overview.target)
     cameraRef.current = camera
 
-    // Renderer with better shadows and antialiasing
+    // Renderer
     const renderer = new THREE.WebGLRenderer({ 
       antialias: true,
       alpha: true,
       powerPreference: "high-performance"
     })
-    renderer.setPixelRatio(window.devicePixelRatio)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)) // Limit pixel ratio for better performance
     renderer.setSize(window.innerWidth, window.innerHeight)
     renderer.shadowMap.enabled = true
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
     containerRef.current.appendChild(renderer.domElement)
     rendererRef.current = renderer
 
-    // Label Renderer with improved styling
+    // Label Renderer
     const labelRenderer = new CSS2DRenderer()
     labelRenderer.setSize(window.innerWidth, window.innerHeight)
     labelRenderer.domElement.style.position = "absolute"
     labelRenderer.domElement.style.top = "0px"
     labelRenderer.domElement.style.pointerEvents = "none"
-    labelRenderer.domElement.style.zIndex = "1" // Ensure labels appear above everything
+    labelRenderer.domElement.style.zIndex = "1"
     containerRef.current.appendChild(labelRenderer.domElement)
     labelRendererRef.current = labelRenderer
 
-    // Enhanced Controls
+    // Controls
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.05
@@ -120,86 +181,72 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     controls.panSpeed = 0.8
     controls.minDistance = 5
     controls.maxDistance = 300
-    controls.target.set(0, 20, 0) // Look at center of helix
+    controls.target.set(0, 20, 0)
     controlsRef.current = controls
 
-    // Improved Lighting
-    // Ambient light
+    // Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.4)
     scene.add(ambientLight)
     
-    // Main directional light with shadows
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.7)
     directionalLight.position.set(40, 80, 60)
     directionalLight.castShadow = true
-    directionalLight.shadow.mapSize.width = 2048
-    directionalLight.shadow.mapSize.height = 2048
+    directionalLight.shadow.mapSize.width = 1024
+    directionalLight.shadow.mapSize.height = 1024
     directionalLight.shadow.camera.near = 10
     directionalLight.shadow.camera.far = 200
     directionalLight.shadow.bias = -0.0005
     scene.add(directionalLight)
     
-    // Accent lights for depth and drama
     const bluePointLight = new THREE.PointLight(0x3366ff, 0.8, 100)
     bluePointLight.position.set(-30, 20, -20)
     scene.add(bluePointLight)
     
-    const purplePointLight = new THREE.PointLight(0xaa33ff, 0.6, 80)
-    purplePointLight.position.set(30, 15, -30)
-    scene.add(purplePointLight)
-    
-    // Ground plane with reflection
+    // Ground plane - moved much lower to avoid cutting through language visualization
     const groundGeometry = new THREE.PlaneGeometry(300, 300)
     const groundMaterial = new THREE.MeshStandardMaterial({ 
       color: 0x0a1929,
       metalness: 0.2,
       roughness: 0.8,
-      envMapIntensity: 0.5,
     })
     const ground = new THREE.Mesh(groundGeometry, groundMaterial)
     ground.rotation.x = -Math.PI / 2
-    ground.position.y = -2
+    ground.position.y = -20 // Moved from -10 to -20 to position it much lower
     ground.receiveShadow = true
     scene.add(ground)
 
-    // Add particle system for ambient effect
+    // Add particle system 
     const particlesGeometry = new THREE.BufferGeometry()
-    const particlesCount = PARTICLE_COUNT
+    const particlesCount = Math.min(PARTICLE_COUNT, 100) // Limit particles for performance
     const positions = new Float32Array(particlesCount * 3)
-    const scales = new Float32Array(particlesCount)
     
     for (let i = 0; i < particlesCount; i++) {
       positions[i * 3] = (Math.random() - 0.5) * 200
       positions[i * 3 + 1] = Math.random() * 100
       positions[i * 3 + 2] = (Math.random() - 0.5) * 200
-      scales[i] = Math.random() * 2.5
     }
     
     particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    particlesGeometry.setAttribute('scale', new THREE.BufferAttribute(scales, 1))
     
     const particlesMaterial = new THREE.PointsMaterial({
       color: 0xffffff,
       size: 0.5,
       transparent: true,
-      opacity: 0.6,
+      opacity: 0.5,
       sizeAttenuation: true,
-      blending: THREE.AdditiveBlending,
     })
     
     const particles = new THREE.Points(particlesGeometry, particlesMaterial)
     scene.add(particles)
     particlesRef.current = particles
 
-    // Interaction Setup
+    // Raycaster for interaction
     const raycaster = new THREE.Raycaster()
     raycasterRef.current = raycaster
 
-    // Process data and create visualizations
+    // Process data and create visualizations directly
     processData(repoData)
     createVisualizations(repoData)
-
-    // Add navigation UI
     createNavigationUI()
 
     // Start animation
@@ -222,6 +269,15 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
       if (controlsRef.current) {
         controlsRef.current.dispose()
       }
+
+      // Clean up UI elements
+      if (sliderContainerRef.current && containerRef.current) {
+        containerRef.current.removeChild(sliderContainerRef.current)
+      }
+      
+      if (navContainerRef.current && containerRef.current) {
+        containerRef.current.removeChild(navContainerRef.current)
+      }
     }
   }, [repoData])
 
@@ -242,129 +298,142 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
 
   // Handle pointer events
   useEffect(() => {
+    let moveTimeout: number;
+    
     const handlePointerMove = (event: PointerEvent) => {
-      if (!containerRef.current || !raycasterRef.current || !sceneRef.current || !cameraRef.current) return
+      // Clear previous timeout
+      window.clearTimeout(moveTimeout);
+      
+      // Set new timeout to debounce raycasting
+      moveTimeout = window.setTimeout(() => {
+        if (!containerRef.current || !raycasterRef.current || !sceneRef.current || !cameraRef.current) return;
+        if (isLoading) return; // Don't process events while loading
 
-      const rect = containerRef.current.getBoundingClientRect()
-      pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
-      pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+        try {
+          const rect = containerRef.current.getBoundingClientRect()
+          pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
+          pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
 
-      raycasterRef.current.setFromCamera(pointerRef.current, cameraRef.current)
-      const intersects = raycasterRef.current.intersectObjects(sceneRef.current.children, true)
+          raycasterRef.current.setFromCamera(pointerRef.current, cameraRef.current)
+          const intersects = raycasterRef.current.intersectObjects(sceneRef.current.children, true)
 
-      let newlyHovered: THREE.Object3D | null = null
-      for (let i = 0; i < intersects.length; i++) {
-        let obj = intersects[i].object
-        // Traverse up to find an object with userData.type
-        while (obj && !(obj.userData && obj.userData.type)) {
-          obj = obj.parent as THREE.Object3D
-        }
-        if (obj) {
-          newlyHovered = obj
-          break // Found the first interactable object
-        }
-      }
-
-      // Remove existing hover label if object changed or no longer hovering
-      if (hoveredObject !== newlyHovered && hoverLabelRef.current && sceneRef.current) {
-        sceneRef.current.remove(hoverLabelRef.current)
-        hoverLabelRef.current = null
-      }
-
-      if (hoveredObject !== newlyHovered) {
-        // Clear previous hover effect
-        if (
-          hoveredObject &&
-          (hoveredObject as THREE.Mesh).material &&
-          (hoveredObject as THREE.Mesh).material instanceof THREE.Material
-        ) {
-          const material = (hoveredObject as THREE.Mesh).material as THREE.MeshStandardMaterial
-          if (material.emissive) {
-            material.emissive.setHex(0x000000)
-          }
-        }
-
-        setHoveredObject(newlyHovered)
-
-        if (
-          newlyHovered &&
-          (newlyHovered as THREE.Mesh).material &&
-          (newlyHovered as THREE.Mesh).material instanceof THREE.Material
-        ) {
-          // Apply new hover effect
-          const material = (newlyHovered as THREE.Mesh).material as THREE.MeshStandardMaterial
-          if (material.emissive) {
-            material.emissive.setHex(0x555555) // Glow effect
-          }
-
-          // Create and add hover description label
-          if (newlyHovered.userData.type && sceneRef.current) {
-            const hoverDesc = createHoverDescription(newlyHovered)
-            if (hoverDesc) {
-              sceneRef.current.add(hoverDesc)
-              hoverLabelRef.current = hoverDesc
+          let newlyHovered: THREE.Object3D | null = null
+          for (let i = 0; i < intersects.length; i++) {
+            let obj = intersects[i].object
+            // Traverse up to find an object with userData.type
+            while (obj && !(obj.userData && obj.userData.type)) {
+              obj = obj.parent as THREE.Object3D
+            }
+            if (obj) {
+              newlyHovered = obj
+              break // Found the first interactable object
             }
           }
 
-          // Display Tooltip
-          const tooltipElement = document.getElementById("tooltip")
-          if (tooltipElement) {
-            tooltipElement.style.display = "block"
-            tooltipElement.style.left = `${event.clientX + 10}px`
-            tooltipElement.style.top = `${event.clientY + 10}px`
+          // Remove existing hover label if object changed or no longer hovering
+          if (hoveredObject !== newlyHovered && hoverLabelRef.current && sceneRef.current) {
+            sceneRef.current.remove(hoverLabelRef.current)
+            hoverLabelRef.current = null
+          }
 
-            let tooltipContent = ""
-            const ud = newlyHovered.userData
-            switch (ud.type) {
-              case "commit":
-                const fullMessage = ud.message || ""
-                const messageLines = fullMessage.split("\n")
-                const title = messageLines[0].trim()
-                const body = messageLines.slice(1).join("\n").trim()
+          if (hoveredObject !== newlyHovered) {
+            // Clear previous hover effect
+            if (
+              hoveredObject &&
+              (hoveredObject as THREE.Mesh).material &&
+              (hoveredObject as THREE.Mesh).material instanceof THREE.Material
+            ) {
+              const material = (hoveredObject as THREE.Mesh).material as THREE.MeshStandardMaterial
+              if (material.emissive) {
+                material.emissive.setHex(0x000000)
+              }
+            }
 
-                tooltipContent = `Title: ${title}\n`
-                tooltipContent += `--------------------\n`
-                if (body) {
-                  const maxBodyLength = 250 // Limit message body in tooltip
-                  tooltipContent += `Message:\n${body.length > maxBodyLength ? body.substring(0, maxBodyLength) + "..." : body}\n`
-                  tooltipContent += `--------------------\n`
+            setHoveredObject(newlyHovered)
+
+            if (
+              newlyHovered &&
+              (newlyHovered as THREE.Mesh).material &&
+              (newlyHovered as THREE.Mesh).material instanceof THREE.Material
+            ) {
+              // Apply new hover effect
+              const material = (newlyHovered as THREE.Mesh).material as THREE.MeshStandardMaterial
+              if (material.emissive) {
+                material.emissive.setHex(0x555555) // Glow effect
+              }
+
+              // Create and add hover description label
+              if (newlyHovered.userData.type && sceneRef.current) {
+                const hoverDesc = createHoverDescription(newlyHovered)
+                if (hoverDesc) {
+                  sceneRef.current.add(hoverDesc)
+                  hoverLabelRef.current = hoverDesc
                 }
-                tooltipContent += `Author: ${ud.author}\n`
-                tooltipContent += `Date: ${ud.date}\n`
-                tooltipContent += `SHA: ${ud.sha.substring(0, 7)}\n`
-                tooltipContent += `(Click to view on GitHub)`
-                break
-              case "language_segment":
-                tooltipContent = `Language: ${ud.name}\nBytes: ${ud.bytes.toLocaleString()}\nPercentage: ${ud.percentage}%`
-                break
-              case "contributor_sphere":
-                tooltipContent = `Contributor: ${ud.login}\nContributions: ${ud.contributions}\n(Click to view profile)`
-                break
-              case "repo_representation": // Tooltip for the icosahedron
-                tooltipContent = `Repository:\n${ud.name}`
-                break
-              default:
-                tooltipContent = "Unknown Object"
-            }
-            tooltipElement.textContent = tooltipContent
-          }
-        } else {
-          // No object hovered
-          const tooltipElement = document.getElementById("tooltip")
-          if (tooltipElement) {
-            tooltipElement.style.display = "none"
-          }
-        }
-      }
+              }
 
-      // Update tooltip position continuously if hovered
-      if (newlyHovered) {
-        const tooltipElement = document.getElementById("tooltip")
-        if (tooltipElement) {
-          tooltipElement.style.left = `${event.clientX + 10}px`
-          tooltipElement.style.top = `${event.clientY + 10}px`
+              // Display Tooltip
+              const tooltipElement = document.getElementById("tooltip")
+              if (tooltipElement) {
+                tooltipElement.style.display = "block"
+                tooltipElement.style.left = `${event.clientX + 10}px`
+                tooltipElement.style.top = `${event.clientY + 10}px`
+
+                let tooltipContent = ""
+                const ud = newlyHovered.userData
+                switch (ud.type) {
+                  case "commit":
+                    const fullMessage = ud.message || ""
+                    const messageLines = fullMessage.split("\n")
+                    const title = messageLines[0].trim()
+                    const body = messageLines.slice(1).join("\n").trim()
+
+                    tooltipContent = `Title: ${title}\n`
+                    tooltipContent += `--------------------\n`
+                    if (body) {
+                      const maxBodyLength = 250 // Limit message body in tooltip
+                      tooltipContent += `Message:\n${body.length > maxBodyLength ? body.substring(0, maxBodyLength) + "..." : body}\n`
+                      tooltipContent += `--------------------\n`
+                    }
+                    tooltipContent += `Author: ${ud.author}\n`
+                    tooltipContent += `Date: ${ud.date}\n`
+                    tooltipContent += `SHA: ${ud.sha.substring(0, 7)}\n`
+                    tooltipContent += `(Click to view on GitHub)`
+                    break
+                  case "language_segment":
+                    tooltipContent = `Language: ${ud.name}\nBytes: ${ud.bytes.toLocaleString()}\nPercentage: ${ud.percentage}%`
+                    break
+                  case "contributor_sphere":
+                    tooltipContent = `Contributor: ${ud.login}\nContributions: ${ud.contributions}\n(Click to view profile)`
+                    break
+                  case "repo_representation": // Tooltip for the icosahedron
+                    tooltipContent = `Repository:\n${ud.name}`
+                    break
+                  default:
+                    tooltipContent = "Unknown Object"
+                }
+                tooltipElement.textContent = tooltipContent
+              }
+            } else {
+              // No object hovered
+              const tooltipElement = document.getElementById("tooltip")
+              if (tooltipElement) {
+                tooltipElement.style.display = "none"
+              }
+            }
+          }
+
+          // Update tooltip position continuously if hovered
+          if (newlyHovered) {
+            const tooltipElement = document.getElementById("tooltip")
+            if (tooltipElement) {
+              tooltipElement.style.left = `${event.clientX + 10}px`
+              tooltipElement.style.top = `${event.clientY + 10}px`
+            }
+          }
+        } catch (error) {
+          console.error("Error in pointer move handler:", error);
         }
-      }
+      }, 16); // Roughly 60fps
     }
 
     const handlePointerClick = (event: PointerEvent) => {
@@ -382,10 +451,11 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     window.addEventListener("click", handlePointerClick)
 
     return () => {
+      window.clearTimeout(moveTimeout);
       window.removeEventListener("pointermove", handlePointerMove)
       window.removeEventListener("click", handlePointerClick)
     }
-  }, [hoveredObject])
+  }, [hoveredObject, isLoading])
 
   // Process data to assign colors to contributors
   const processData = (repoData: RepoData) => {
@@ -395,6 +465,11 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
       contributorColorsRef.current[contributor.login] = new THREE.Color().setHSL((index * 0.17) % 1.0, 0.6, 0.6)
     })
     contributorColorsRef.current["null"] = new THREE.Color(0x888888) // Gray for unknown/null authors
+    
+    // Store sorted commits for time train reference
+    sortedCommitsRef.current = [...repoData.commits].sort(
+      (a, b) => new Date(a.commit.author.date).getTime() - new Date(b.commit.author.date).getTime(),
+    )
   }
 
   // Create all visualizations
@@ -435,21 +510,24 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     }
     sceneRef.current.add(repoIcosahedron)
     repoIcosahedronRef.current = repoIcosahedron
+    
+    // Create timeline train and slider after everything else is set up
+    createTimelineTrain()
+    createTimelineSlider()
   }
 
-  // Create commit graph - enhanced with time ribbon
+  // Create commit graph - simplified version
   const createCommitGraph = (commits: Commit[]) => {
     const group = new THREE.Group()
     const commitObjects: Record<string, CommitObject> = {}
 
-    // Sort commits roughly by date (oldest first) for layout
+    // Sort commits by date
     const sortedCommits = [...commits].sort(
       (a, b) => new Date(a.commit.author.date).getTime() - new Date(b.commit.author.date).getTime(),
     )
 
-    // Create a time ribbon (spiral) that follows the helix
+    // Create ribbon points
     const ribbonPoints: THREE.Vector3[] = []
-    const ribbonCurve = new THREE.CatmullRomCurve3([])
     const totalCommits = sortedCommits.length
     
     for (let i = 0; i <= totalCommits; i++) {
@@ -462,10 +540,20 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
       ribbonPoints.push(new THREE.Vector3(x, y, z))
     }
     
-    ribbonCurve.points = ribbonPoints
-    const ribbonGeometry = new THREE.TubeGeometry(ribbonCurve, totalCommits * 2, TIME_RIBBON_WIDTH, 8, false)
+    // Create curve and tube
+    const ribbonCurve = new THREE.CatmullRomCurve3(ribbonPoints)
+    timeRibbonCurveRef.current = ribbonCurve
     
-    // Create a gradient material for the ribbon
+    // Use appropriate detail level based on commit count
+    const ribbonDetail = Math.min(totalCommits, 100)
+    const ribbonGeometry = new THREE.TubeGeometry(
+      ribbonCurve, 
+      ribbonDetail, 
+      TIME_RIBBON_WIDTH, 
+      8, 
+      false
+    )
+    
     const ribbonMaterial = new THREE.MeshStandardMaterial({
       color: 0x2288ff,
       metalness: 0.5,
@@ -481,38 +569,46 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     group.add(timeRibbon)
     timeRibbonRef.current = timeRibbon
 
-    // Enhanced commit spheres
-    const commitSphereGeo = new THREE.SphereGeometry(COMMIT_RADIUS, 24, 24)
-    
-    // Track important commits for bigger representation
+    // For large repos, limit visible commits
+    const maxVisibleCommits = Math.min(sortedCommits.length, 200)
+    const visibleCommits = sortedCommits.length <= maxVisibleCommits 
+      ? sortedCommits 
+      : sortedCommits.filter((commit, i) => {
+          // Keep important commits and sample others
+          return commit.parents.length > 1 || // Keep all merge commits
+                 i === 0 || // Keep first commit
+                 i === sortedCommits.length - 1 || // Keep last commit
+                 i % Math.ceil(sortedCommits.length / maxVisibleCommits) === 0 // Sample others
+        })
+
+    // Create commit spheres
+    const commitSphereGeo = new THREE.SphereGeometry(COMMIT_RADIUS, 16, 16)
     const commitDates = sortedCommits.map(c => new Date(c.commit.author.date).getTime())
     const timeRange = Math.max(...commitDates) - Math.min(...commitDates)
     
-    sortedCommits.forEach((commitData, index) => {
+    visibleCommits.forEach((commitData) => {
       const authorLogin = commitData.author?.login || null
       const color = contributorColorsRef.current[authorLogin || "null"] || contributorColorsRef.current["null"]
       
-      // Create a slightly more realistic material
-      const material = new THREE.MeshPhysicalMaterial({ 
+      // Create commit mesh
+      const material = new THREE.MeshStandardMaterial({ 
         color: color, 
         metalness: 0.6, 
         roughness: 0.3,
-        clearcoat: 0.5,
-        clearcoatRoughness: 0.2,
-        emissive: new THREE.Color(color).multiplyScalar(0.2)
+        emissive: new THREE.Color(color).multiplyScalar(0.1)
       })
       
       const mesh = new THREE.Mesh(commitSphereGeo, material)
-      mesh.castShadow = true
-      mesh.receiveShadow = true
-
-      // Position on helix with spiral pattern
-      const angle = (index / COMMITS_PER_LOOP) * Math.PI * 2
+      
+      // Calculate position
+      const index = sortedCommits.indexOf(commitData)
+      const normalizedIndex = index / sortedCommits.length
+      const angle = (normalizedIndex * totalCommits / COMMITS_PER_LOOP) * Math.PI * 2
       const xPos = HELIX_RADIUS * Math.cos(angle)
       const zPos = HELIX_RADIUS * Math.sin(angle)
-      const yPos = HELIX_START_Y + (index / COMMITS_PER_LOOP) * HELIX_PITCH
+      const yPos = HELIX_START_Y + (normalizedIndex * totalCommits / COMMITS_PER_LOOP) * HELIX_PITCH
       
-      // Determine if this is a significant commit (merge or old)
+      // Apply scaling and jitter
       const isMerge = commitData.parents.length > 1
       const commitTime = new Date(commitData.commit.author.date).getTime()
       const commitAge = (commitTime - Math.min(...commitDates)) / timeRange
@@ -520,27 +616,30 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
                            commitData.commit.message.toLowerCase().includes('version') ||
                            commitData.commit.message.toLowerCase().includes('milestone')
       
-      // Scale important commits to be more visible
       let scale = 1.0
       if (isMerge) scale *= 1.3
       if (isSignificant) scale *= 1.5
-      if (commitAge < 0.1) scale *= 1.2 // Emphasize early commits
+      if (commitAge < 0.1) scale *= 1.2
       
       mesh.scale.set(scale, scale, scale)
       
-      // Add slight jitter for visual interest
-      const jitterFactor = isMerge ? 0.8 : 0.2
-      const jitterX = (Math.random() - 0.5) * jitterFactor
-      const jitterY = (Math.random() - 0.5) * jitterFactor
-      const jitterZ = (Math.random() - 0.5) * jitterFactor
-      
-      mesh.position.set(
-        xPos + jitterX, 
-        yPos + jitterY, 
-        zPos + jitterZ
+      // Add jitter
+      const jitterFactor = isMerge ? 0.5 : 0.2
+      const jitter = new THREE.Vector3(
+        (Math.random() - 0.5) * jitterFactor,
+        (Math.random() - 0.5) * jitterFactor,
+        (Math.random() - 0.5) * jitterFactor
       )
-
-      // Store data for interactions
+      
+      const finalPosition = new THREE.Vector3(
+        xPos + jitter.x,
+        yPos + jitter.y,
+        zPos + jitter.z
+      )
+      
+      mesh.position.copy(finalPosition)
+      
+      // Store metadata
       mesh.userData = {
         type: "commit",
         sha: commitData.sha,
@@ -550,91 +649,49 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
         url: commitData.html_url,
         parents: commitData.parents.map((p) => p.sha),
         isSignificant,
-        isMerge
+        isMerge,
+        index
       }
       
-      commitObjects[commitData.sha] = { mesh: mesh, data: commitData }
+      commitObjects[commitData.sha] = { 
+        mesh, 
+        data: commitData,
+        position: finalPosition
+      }
+      
       group.add(mesh)
-      
-      // Add glow effect for significant commits
-      if (isSignificant) {
-        const glowMaterial = new THREE.MeshBasicMaterial({
-          color: new THREE.Color(color).multiplyScalar(1.5),
-          transparent: true,
-          opacity: 0.4,
-          side: THREE.BackSide
-        })
-        
-        const glowMesh = new THREE.Mesh(
-          new THREE.SphereGeometry(COMMIT_RADIUS * scale * 1.5, 24, 24),
-          glowMaterial
-        )
-        
-        glowMesh.position.copy(mesh.position)
-        group.add(glowMesh)
-      }
     })
 
-    // Store commit objects for later use
+    // Store commit objects
     commitObjectsRef.current = commitObjects
 
-    // Draw parent connections with enhanced curved connections
+    // Add connections - limit count for performance
+    const maxConnections = Math.min(300, sortedCommits.length)
+    let connectionCount = 0
+    
     Object.values(commitObjects).forEach((commitObj) => {
-      const childMesh = commitObj.mesh
+      if (connectionCount >= maxConnections) return
       
       commitObj.data.parents.forEach((parentSha) => {
+        if (connectionCount >= maxConnections) return
+        
         const parentObj = commitObjects[parentSha]
         if (parentObj) {
-          const parentMesh = parentObj.mesh
+          const isMerge = commitObj.data.parents.length > 1
           
-          // Create a smooth Bezier curve between commits
-          const start = parentMesh.position.clone()
-          const end = childMesh.position.clone()
-          
-          // Calculate control points for a smoother curve
-          const midPoint = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5)
-          
-          const direction = new THREE.Vector3().subVectors(end, start).normalize()
-          const perpendicular = new THREE.Vector3(-direction.z, 0, direction.x).normalize()
-          
-          // Adjust curve based on commit relationship
-          let curveIntensity = 2
-          if (commitObj.data.parents.length > 1) {
-            curveIntensity = 3 // More curved for merge commits
-          }
-          
-          midPoint.add(perpendicular.multiplyScalar(curveIntensity))
-          
-          // Create the curve
-          const curve = new THREE.QuadraticBezierCurve3(start, midPoint, end)
-          const points = curve.getPoints(12) // More points for smoother curve
-          
-          // Create a tube along the curve for a more polished look
-          const tubeGeometry = new THREE.TubeGeometry(
-            new THREE.CatmullRomCurve3(points),
-            12,
-            0.15, // Thinner tube
-            8,
-            false
-          )
-          
-          // Determine connection color based on relationship
-          let connectionColor = 0x666666
-          if (commitObj.data.parents.length > 1) {
-            // Merge connection - make it more distinctive
-            connectionColor = 0x9966ff
-          }
-          
-          const tubeMaterial = new THREE.MeshStandardMaterial({
-            color: connectionColor,
+          // Create simple line for better performance
+          const points = [parentObj.position.clone(), commitObj.position.clone()]
+          const lineGeometry = new THREE.BufferGeometry().setFromPoints(points)
+          const lineColor = isMerge ? 0x9966ff : 0x666666
+          const lineMaterial = new THREE.LineBasicMaterial({
+            color: lineColor, 
             transparent: true,
-            opacity: 0.4,
-            metalness: 0.3,
-            roughness: 0.5
+            opacity: isMerge ? 0.5 : 0.3
           })
           
-          const tube = new THREE.Mesh(tubeGeometry, tubeMaterial)
-          group.add(tube)
+          const line = new THREE.Line(lineGeometry, lineMaterial)
+          group.add(line)
+          connectionCount++
         }
       })
     })
@@ -773,60 +830,154 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     return group
   }
 
-  // Create language donut chart
+  // Create language donut chart - enhanced version
   const createLanguageDonut = (languages: Record<string, number>) => {
     const group = new THREE.Group()
     const totalBytes = Object.values(languages).reduce((sum, bytes) => sum + bytes, 0)
     if (totalBytes === 0) return group
 
+    // Create a stand for the donut
+    const standGeometry = new THREE.CylinderGeometry(DONUT_INNER_RADIUS * 0.8, DONUT_INNER_RADIUS * 1.2, 1, 32)
+    const standMaterial = new THREE.MeshStandardMaterial({
+      color: 0x333344,
+      metalness: 0.7,
+      roughness: 0.3,
+    })
+    const stand = new THREE.Mesh(standGeometry, standMaterial)
+    stand.position.y = -DONUT_EXTRUDE_DEPTH / 2 - 0.5
+    group.add(stand)
+
+    // Create a central sphere
+    const coreGeometry = new THREE.SphereGeometry(DONUT_INNER_RADIUS * 0.6, 24, 24)
+    const coreMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0x3366ff,
+      metalness: 0.7,
+      roughness: 0.2,
+      clearcoat: 1.0,
+      emissive: 0x3366ff,
+      emissiveIntensity: 0.2,
+    })
+    const core = new THREE.Mesh(coreGeometry, coreMaterial)
+    core.position.y = 1
+    group.add(core)
+
+    // Add point light in the center for better illumination
+    const centerLight = new THREE.PointLight(0x3366ff, 1, 30)
+    centerLight.position.set(0, 1, 0)
+    group.add(centerLight)
+
+    // Sort languages by size
     const sortedLangs = Object.entries(languages)
       .filter(([, bytes]) => bytes > 0)
       .sort(([, a], [, b]) => b - a)
 
     let currentAngle = Math.PI / 2 // Start at 12 o'clock
 
-    const extrudeSettings = { steps: 1, depth: DONUT_EXTRUDE_DEPTH, bevelEnabled: false }
+    // Enhanced extrude settings with bevels
+    const extrudeSettings = { 
+      steps: 2, 
+      depth: DONUT_EXTRUDE_DEPTH, 
+      bevelEnabled: true,
+      bevelThickness: 0.2,
+      bevelSize: 0.1,
+      bevelOffset: 0,
+      bevelSegments: 3
+    }
 
+    // Create a group for all segments
+    const segmentsGroup = new THREE.Group()
+    group.add(segmentsGroup)
+
+    // Create segments with small spacing between them
     sortedLangs.forEach(([lang, bytes]) => {
       const percentage = bytes / totalBytes
       const angleSweep = percentage * Math.PI * 2
-      if (angleSweep < 0.01) return // Skip very small segments
+      
+      if (angleSweep < 0.02) return // Skip very small segments
+      
+      // Apply segment spacing
+      const startAngle = currentAngle + DONUT_SEGMENT_SPACING / 2
+      const endAngle = currentAngle + angleSweep - DONUT_SEGMENT_SPACING / 2
 
-      const color = stringToColor(lang)
+      // Use predefined colors for common languages or generate one if not in the list
+      let color = LANGUAGE_COLORS[lang]
+      if (!color) {
+        // Use a consistent algorithm for languages not in our palette
+        color = getLanguageColor(lang)
+      } else {
+        // Brighten predefined colors by 15%
+        const threeColor = new THREE.Color(color)
+        threeColor.multiplyScalar(1.15) // Brighten the color
+        color = (Math.floor(threeColor.r * 255) << 16) | 
+                (Math.floor(threeColor.g * 255) << 8) | 
+                 Math.floor(threeColor.b * 255)
+      }
 
+      // Create shape with rounded corners
       const shape = new THREE.Shape()
-      shape.absarc(0, 0, DONUT_OUTER_RADIUS, currentAngle, currentAngle + angleSweep, false)
-      shape.absarc(0, 0, DONUT_INNER_RADIUS, currentAngle + angleSweep, currentAngle, true)
+      shape.absarc(0, 0, DONUT_OUTER_RADIUS, startAngle, endAngle, false)
+      shape.absarc(0, 0, DONUT_INNER_RADIUS, endAngle, startAngle, true)
 
       const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings)
-      const material = new THREE.MeshStandardMaterial({
+      
+      // Enhanced material with brighter emissive values
+      const material = new THREE.MeshPhysicalMaterial({
         color: color,
-        metalness: 0.1,
-        roughness: 0.8,
+        metalness: 0.3,
+        roughness: 0.5,
+        clearcoat: 0.3,
+        clearcoatRoughness: 0.25,
+        reflectivity: 0.5,
+        emissive: new THREE.Color(color).multiplyScalar(0.25), // Increased from 0.15 for more glow
         side: THREE.DoubleSide,
       })
+      
       const segment = new THREE.Mesh(geometry, material)
-      segment.position.y = -DONUT_EXTRUDE_DEPTH / 2 // Center extrusion
+      
+      // Slightly elevate each segment for better 3D effect
+      segment.position.y = -DONUT_EXTRUDE_DEPTH / 2 + Math.random() * 0.1
 
+      // Store metadata for interaction
       segment.userData = {
         type: "language_segment",
         name: lang,
         bytes: bytes,
         percentage: (percentage * 100).toFixed(1),
+        color: color
       }
-      group.add(segment)
+      
+      segmentsGroup.add(segment)
 
-      // Add Label outside the donut
-      const midAngle = currentAngle + angleSweep / 2
-      const labelX = Math.cos(midAngle) * DONUT_LABEL_OFFSET
-      const labelZ = -Math.sin(midAngle) * DONUT_LABEL_OFFSET
-
+      // Create enhanced label with icon
       const labelDiv = document.createElement("div")
-      labelDiv.className = "label"
-      labelDiv.textContent = `${lang} (${(percentage * 100).toFixed(1)}%)`
-      labelDiv.style.fontSize = "10px"
+      labelDiv.className = "language-label"
+      
+      // Add styling for better visibility
+      labelDiv.style.fontSize = "11px"
+      labelDiv.style.fontWeight = "bold"
       labelDiv.style.color = "#" + new THREE.Color(color).getHexString()
-      labelDiv.style.backgroundColor = "rgba(0,0,0,0.6)"
+      labelDiv.style.backgroundColor = "rgba(0,0,0,0.7)"
+      labelDiv.style.padding = "3px 6px"
+      labelDiv.style.borderRadius = "4px"
+      labelDiv.style.backdropFilter = "blur(2px)"
+      labelDiv.style.border = `1px solid #${new THREE.Color(color).getHexString()}`
+      labelDiv.style.boxShadow = "0 2px 4px rgba(0,0,0,0.5)"
+      labelDiv.style.whiteSpace = "nowrap"
+      
+      // Add language icon when available
+      const languageIcon = getLanguageIcon(lang)
+      if (languageIcon) {
+        labelDiv.textContent = `${languageIcon} ${lang} (${(percentage * 100).toFixed(1)}%)`
+      } else {
+        labelDiv.textContent = `${lang} (${(percentage * 100).toFixed(1)}%)`
+      }
+      
+      // Position label with slight randomization for better layout
+      const midAngle = (startAngle + endAngle) / 2
+      const labelDistance = DONUT_LABEL_OFFSET + (percentage > 0.1 ? 0 : 3) // Push small segments' labels further out
+      const labelX = Math.cos(midAngle) * labelDistance
+      const labelZ = -Math.sin(midAngle) * labelDistance
+      
       const langLabel = new CSS2DObject(labelDiv)
       langLabel.position.set(labelX, 0, labelZ)
       group.add(langLabel)
@@ -834,20 +985,382 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
       currentAngle += angleSweep
     })
 
-    // Title Label
+    // Add title with improved styling
     const titleDiv = document.createElement("div")
-    titleDiv.className = "label"
+    titleDiv.className = "language-title"
     titleDiv.textContent = "Languages"
-    titleDiv.style.fontSize = "14px"
+    titleDiv.style.fontSize = "16px"
     titleDiv.style.fontWeight = "bold"
     titleDiv.style.color = "#fff"
-    titleDiv.style.backgroundColor = "transparent"
-    titleDiv.style.textAlign = "center"
+    titleDiv.style.textShadow = "0 0 5px rgba(51, 102, 255, 0.8)"
+    titleDiv.style.backgroundColor = "rgba(10, 25, 41, 0.7)"
+    titleDiv.style.padding = "5px 15px"
+    titleDiv.style.borderRadius = "20px"
+    titleDiv.style.border = "1px solid rgba(51, 102, 255, 0.5)"
+    titleDiv.style.boxShadow = "0 3px 8px rgba(0,0,0,0.5)"
+    titleDiv.style.backdropFilter = "blur(3px)"
+    
     const titleLabel = new CSS2DObject(titleDiv)
-    titleLabel.position.set(0, DONUT_OUTER_RADIUS * 1.2, 0) // Position above donut
+    titleLabel.position.set(0, DONUT_OUTER_RADIUS * 1.5, 0)
     group.add(titleLabel)
 
+    // Add subtle rotation animation
+    const animate = () => {
+      segmentsGroup.rotation.y += 0.001
+      requestAnimationFrame(animate)
+    }
+    animate()
+
     return group
+  }
+
+  // Helper function to get consistent colors for languages with brighter output
+  const getLanguageColor = (language: string): number => {
+    let hash = 0
+    for (let i = 0; i < language.length; i++) {
+      hash = language.charCodeAt(i) + ((hash << 5) - hash)
+    }
+    
+    // Generate vibrant colors with good saturation
+    const r = Math.abs((hash >> 16) & 255)
+    const g = Math.abs((hash >> 8) & 255)
+    const b = Math.abs(hash & 255)
+    
+    // Ensure colors are vibrant by boosting the dominant channel and overall brightness
+    const max = Math.max(r, g, b)
+    const boost = 255 / max
+    
+    // Higher multipliers (0.9 instead of 0.8) for brighter colors
+    const boostedR = Math.min(255, Math.floor(r * boost * 0.9))
+    const boostedG = Math.min(255, Math.floor(g * boost * 0.9))
+    const boostedB = Math.min(255, Math.floor(b * boost * 0.9))
+    
+    return (boostedR << 16) | (boostedG << 8) | boostedB
+  }
+
+  // Helper function to get language icons
+  const getLanguageIcon = (language: string): string => {
+    const icons: Record<string, string> = {
+      JavaScript: "🟨",
+      TypeScript: "🔵",
+      Python: "🐍",
+      Java: "☕",
+      Ruby: "💎",
+      Go: "🔹",
+      Rust: "⚙️",
+      "C++": "🔧",
+      "C#": "🟢",
+      PHP: "🐘",
+      Swift: "🦅",
+      Kotlin: "🎯",
+      HTML: "🌐",
+      CSS: "🎨",
+      Shell: "🐚",
+      Markdown: "📝",
+      YAML: "📋",
+      JSON: "📦"
+    }
+    
+    return icons[language] || "🧩"
+  }
+
+  // Create timeline train - simplified
+  const createTimelineTrain = () => {
+    if (!sceneRef.current || !timeRibbonCurveRef.current) return
+    
+    // Create train group
+    const trainGroup = new THREE.Group()
+    
+    // Main sphere
+    const trainSphere = new THREE.Mesh(
+      new THREE.SphereGeometry(TRAIN_SIZE, 12, 12),
+      new THREE.MeshStandardMaterial({
+        color: TRAIN_COLOR,
+        emissive: TRAIN_EMISSION_COLOR,
+        emissiveIntensity: 0.5
+      })
+    )
+    trainGroup.add(trainSphere)
+    
+    // Direction cone
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(TRAIN_SIZE * 0.6, TRAIN_SIZE * 2, 8),
+      new THREE.MeshStandardMaterial({
+        color: TRAIN_COLOR,
+        emissive: TRAIN_EMISSION_COLOR,
+        emissiveIntensity: 0.3
+      })
+    )
+    cone.rotation.x = Math.PI / 2
+    cone.position.z = TRAIN_SIZE * 1.2
+    trainGroup.add(cone)
+      
+    // Light
+    const light = new THREE.PointLight(TRAIN_EMISSION_COLOR, 1, 8)
+    trainGroup.add(light)
+    
+    sceneRef.current.add(trainGroup)
+    timeTrainRef.current = trainGroup
+    
+    // Initialize position
+    updateTrainPosition(0)
+  }
+  
+  // Create slider - simplified
+  const createTimelineSlider = () => {
+    if (!containerRef.current) return
+    
+    // Container
+    const container = document.createElement('div')
+    container.style.position = 'absolute'
+    container.style.bottom = '80px'
+    container.style.left = '50%'
+    container.style.transform = 'translateX(-50%)'
+    container.style.width = '80%'
+    container.style.maxWidth = '600px'
+    container.style.background = 'rgba(10, 25, 41, 0.7)'
+    container.style.padding = '12px 20px'
+    container.style.borderRadius = '8px'
+    container.style.boxShadow = '0 4px 6px rgba(0,0,0,0.2)'
+    container.style.zIndex = '100'
+    container.style.display = 'none' // Hidden initially
+    
+    // Title
+    const title = document.createElement('div')
+    title.textContent = 'Time Machine'
+    title.style.color = '#ffffff'
+    title.style.fontSize = '14px'
+    title.style.fontWeight = 'bold'
+    title.style.textAlign = 'center'
+    title.style.marginBottom = '8px'
+    
+    // Slider
+    const slider = document.createElement('input')
+    slider.type = 'range'
+    slider.min = '0'
+    slider.max = '1000'
+    slider.value = '0'
+    slider.style.width = '100%'
+    slider.style.height = '20px'
+    slider.style.appearance = 'none'
+    slider.style.background = 'rgba(20, 40, 60, 0.8)'
+    slider.style.borderRadius = '10px'
+    slider.style.cursor = 'pointer'
+    
+    // Text
+    const text = document.createElement('div')
+    text.textContent = 'Drag to explore commit history'
+    text.style.color = '#ffffff'
+    text.style.fontSize = '12px'
+    text.style.textAlign = 'center'
+    text.style.marginTop = '5px'
+    
+    // Add POV toggle
+    const controlsRow = document.createElement('div')
+    controlsRow.style.display = 'flex'
+    controlsRow.style.alignItems = 'center'
+    controlsRow.style.justifyContent = 'center'
+    controlsRow.style.marginTop = '10px'
+    
+    const povToggle = document.createElement('div')
+    povToggle.style.display = 'flex'
+    povToggle.style.alignItems = 'center'
+    povToggle.style.cursor = 'pointer'
+    povToggle.style.padding = '5px 8px'
+    povToggle.style.borderRadius = '4px'
+    povToggle.style.backgroundColor = 'rgba(20, 40, 60, 0.8)'
+    povToggle.style.transition = 'background-color 0.2s'
+    
+    const povCheckbox = document.createElement('div')
+    povCheckbox.style.width = '16px'
+    povCheckbox.style.height = '16px'
+    povCheckbox.style.borderRadius = '3px'
+    povCheckbox.style.border = '2px solid white'
+    povCheckbox.style.marginRight = '8px'
+    povCheckbox.style.display = 'flex'
+    povCheckbox.style.alignItems = 'center'
+    povCheckbox.style.justifyContent = 'center'
+    povCheckbox.innerHTML = trainPOVEnabled ? '✓' : ''
+    povCheckbox.style.color = 'white'
+    povCheckbox.style.transition = 'background-color 0.2s'
+    povCheckbox.style.backgroundColor = trainPOVEnabled ? '#ffaa00' : 'transparent'
+    
+    const povLabel = document.createElement('span')
+    povLabel.textContent = 'Train POV Mode'
+    povLabel.style.color = 'white'
+    povLabel.style.fontSize = '12px'
+    
+    povToggle.appendChild(povCheckbox)
+    povToggle.appendChild(povLabel)
+    
+    povToggle.addEventListener('click', () => {
+      setTrainPOVEnabled(!trainPOVEnabled)
+      povCheckbox.innerHTML = !trainPOVEnabled ? '✓' : ''
+      povCheckbox.style.backgroundColor = !trainPOVEnabled ? '#ffaa00' : 'transparent'
+      
+      // Update camera immediately if turning on POV mode
+      if (!trainPOVEnabled && timeRibbonCurveRef.current && cameraRef.current && controlsRef.current) {
+        const position = trainPositionRef.current
+        const point = timeRibbonCurveRef.current.getPointAt(position)
+        const tangent = timeRibbonCurveRef.current.getTangentAt(position)
+        
+        if (point && tangent) {
+          const trainDirection = tangent.normalize()
+          const behind = trainDirection.clone().multiplyScalar(-3)
+          const up = new THREE.Vector3(0, 1.5, 0)
+          
+          const cameraPos = point.clone().add(behind).add(up)
+          cameraRef.current.position.copy(cameraPos)
+          
+          const lookAhead = point.clone().add(trainDirection.clone().multiplyScalar(10))
+          cameraRef.current.lookAt(lookAhead)
+          controlsRef.current.target.copy(lookAhead)
+          controlsRef.current.update()
+        }
+      }
+    })
+    
+    povToggle.addEventListener('mouseenter', () => {
+      povToggle.style.backgroundColor = 'rgba(30, 50, 70, 0.8)'
+    })
+    
+    povToggle.addEventListener('mouseleave', () => {
+      povToggle.style.backgroundColor = 'rgba(20, 40, 60, 0.8)'
+    })
+    
+    controlsRow.appendChild(povToggle)
+    
+    // Event listener for slider with immediate train position update
+    slider.addEventListener('input', () => {
+      const position = parseInt(slider.value) / 1000
+      setTrainPosition(position)
+      updateTrainPosition(position)
+    })
+    
+    // Assemble
+    container.appendChild(title)
+    container.appendChild(slider)
+    container.appendChild(text)
+    container.appendChild(controlsRow)
+    containerRef.current.appendChild(container)
+    
+    // Store references
+    sliderRef.current = slider
+    sliderContainerRef.current = container
+  }
+  
+  // Update train position - optimized for real-time POV updates
+  const updateTrainPosition = (position: number) => {
+    if (!timeRibbonCurveRef.current || !timeTrainRef.current) return
+    
+    try {
+      // Clamp position to valid range
+      const safePosition = Math.max(0, Math.min(1, position))
+      trainPositionRef.current = safePosition
+      
+      // Get position on curve
+      const point = timeRibbonCurveRef.current.getPointAt(safePosition)
+      const tangent = timeRibbonCurveRef.current.getTangentAt(safePosition)
+      
+      if (!point || !tangent) return;
+      
+      // Position train
+      timeTrainRef.current.position.copy(point)
+      
+      // Orient along curve
+      const lookAt = new THREE.Vector3().copy(point).add(tangent)
+      timeTrainRef.current.lookAt(lookAt)
+      
+      // Update camera if trainPOV is enabled - improved position calculation
+      if (trainPOVEnabled && cameraRef.current && controlsRef.current) {
+        // Calculate camera position - slightly behind and above the train
+        const trainDirection = tangent.clone().normalize()
+        const behind = trainDirection.clone().multiplyScalar(-3) // 3 units behind the train
+        const up = new THREE.Vector3(0, 1.5, 0) // 1.5 units above
+        
+        const cameraPos = point.clone().add(behind).add(up)
+        cameraRef.current.position.copy(cameraPos)
+        
+        // Look ahead of the train - further ahead for better viewing
+        const lookAhead = point.clone().add(trainDirection.clone().multiplyScalar(15))
+        cameraRef.current.lookAt(lookAhead)
+        controlsRef.current.target.copy(lookAhead)
+        
+        // Disable controls to prevent orbit conflicts
+        controlsRef.current.enabled = false
+      } else if (controlsRef.current) {
+        // Re-enable controls when not in POV mode
+        controlsRef.current.enabled = true
+      }
+      
+      // Highlight nearest commit
+      highlightNearestCommit(point)
+    } catch (error) {
+      console.error("Error updating train position:", error)
+    }
+  }
+
+  // Highlight nearest commit - simplified
+  const highlightNearestCommit = (trainPosition: THREE.Vector3) => {
+    if (!sceneRef.current) return
+    
+    // Clear previous highlight
+    if (highlightedCommitRef.current) {
+      if (highlightedCommitRef.current.material instanceof THREE.MeshStandardMaterial) {
+        highlightedCommitRef.current.material.emissive.setHex(0)
+      }
+      highlightedCommitRef.current = null
+    }
+    
+    if (highlightedLabelRef.current) {
+      sceneRef.current.remove(highlightedLabelRef.current)
+      highlightedLabelRef.current = null
+    }
+    
+    // Find closest commit
+    let closest: THREE.Mesh | null = null
+    let closestDistance = Infinity
+    let closestData: Commit | null = null
+    
+    Object.values(commitObjectsRef.current).forEach(({ mesh, data, position }) => {
+      const distance = trainPosition.distanceTo(position)
+      if (distance < closestDistance) {
+        closestDistance = distance
+        closest = mesh
+        closestData = data
+      }
+    })
+    
+    // Apply highlight if close enough
+    if (closest && closestDistance < HIGHLIGHT_DISTANCE) {
+      highlightedCommitRef.current = closest
+      
+      if (closest.material instanceof THREE.MeshStandardMaterial) {
+        closest.material.emissive.setHex(0xffaa00)
+      }
+      
+      // Create label for selected commit
+      const labelDiv = document.createElement("div")
+      labelDiv.style.backgroundColor = "#ffaa00"
+      labelDiv.style.color = "white"
+      labelDiv.style.padding = "5px 10px"
+      labelDiv.style.borderRadius = "4px"
+      labelDiv.style.fontWeight = "bold"
+      labelDiv.style.fontSize = "12px"
+      
+      // Get commit message first line
+      const messageLine = closestData?.commit.message.split("\n")[0] || "Unknown commit"
+      labelDiv.textContent = messageLine.length > 40 ? 
+        messageLine.substring(0, 40) + "..." : 
+        messageLine
+      
+      const label = new CSS2DObject(labelDiv)
+      label.position.copy(closest.position)
+      label.position.y += 3 // Position above commit
+      
+      sceneRef.current.add(label)
+      highlightedLabelRef.current = label
+    }
   }
 
   // Add navigation UI
@@ -870,6 +1383,7 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     const views = [
       { id: 'overview', label: '🔍 Overview' },
       { id: 'commitHistory', label: '📝 Commits' },
+      { id: 'timeMachine', label: '🚂 Time Machine' }, // Add this new option
       { id: 'languages', label: '🧩 Languages' },
       { id: 'contributors', label: '👥 Contributors' }
     ]
@@ -913,90 +1427,160 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     }
   }
   
-  // Navigate to different views
+  // Navigate to different views - fixed variable scope issues
   const navigateToView = (viewId: string) => {
     if (!cameraRef.current || !controlsRef.current) return
     
-    const preset = CAMERA_PRESETS[viewId as keyof typeof CAMERA_PRESETS]
-    if (!preset) return
-    
-    // Get current position and target
-    const startPos = cameraRef.current.position.clone()
-    const startTarget = controlsRef.current.target.clone()
-    const endPos = preset.position.clone()
-    const endTarget = preset.target.clone()
-    
-    // Animation duration in ms
-    const duration = 1000
-    const startTime = Date.now()
-    
-    // Animation function
-    const animateCamera = () => {
-      const elapsed = Date.now() - startTime
-      const progress = Math.min(elapsed / duration, 1)
+    // Disable train POV when switching views (except time machine)
+    if (viewId !== 'timeMachine' && trainPOVEnabled) {
+      setTrainPOVEnabled(false)
       
-      // Ease function (ease-in-out)
-      const easeProgress = progress < 0.5 
-        ? 2 * progress * progress 
-        : -1 + (4 - 2 * progress) * progress
-      
-      // Update camera position and controls target
-      cameraRef.current!.position.lerpVectors(startPos, endPos, easeProgress)
-      controlsRef.current!.target.lerpVectors(startTarget, endTarget, easeProgress)
-      controlsRef.current!.update()
-      
-      if (progress < 1) {
-        requestAnimationFrame(animateCamera)
+      // Update the checkbox in the UI
+      if (sliderContainerRef.current) {
+        const povCheckbox = sliderContainerRef.current.querySelector('div > div')
+        if (povCheckbox) {
+          povCheckbox.innerHTML = ''
+          povCheckbox.style.backgroundColor = 'transparent'
+        }
       }
     }
     
-    // Start animation
-    animateCamera()
+    // Show/hide the time slider based on view
+    if (sliderRef.current && sliderRef.current.parentElement) {
+      sliderRef.current.parentElement.style.display = viewId === 'timeMachine' ? 'flex' : 'none'
+    }
+    
+    // Set time machine specific camera view
+    if (viewId === 'timeMachine' && timeRibbonCurveRef.current) {
+      const position = trainPositionRef.current
+      const point = timeRibbonCurveRef.current.getPointAt(position)
+      const tangent = timeRibbonCurveRef.current.getTangentAt(position)
+      
+      // Position camera to look at the train from a good angle
+      const cameraPosition = point.clone().add(
+        new THREE.Vector3(30, 20, 30)
+      )
+      
+      // Get current position and target
+      const startPos = cameraRef.current.position.clone()
+      const startTarget = controlsRef.current.target.clone()
+      const endPos = cameraPosition.clone()
+      const endTarget = point.clone()
+      
+      // Animation duration in ms
+      const duration = 1000
+      const startTime = Date.now()
+      
+      // Animation function with locally scoped variables for safe closure
+      const animateCamera = () => {
+        // Safely ensure variables are available within this closure
+        const currentCamera = cameraRef.current
+        const currentControls = controlsRef.current
+        
+        if (!currentCamera || !currentControls) return
+        
+        // Use local references to prevent "not defined" errors 
+        const start = startPos
+        const startT = startTarget
+        const end = endPos
+        const endT = endTarget
+        
+        const elapsed = Date.now() - startTime
+        const progress = Math.min(elapsed / duration, 1)
+        
+        // Ease function (ease-in-out)
+        const easeProgress = progress < 0.5 
+          ? 2 * progress * progress 
+          : -1 + (4 - 2 * progress) * progress
+        
+        // Update camera position and controls target
+        currentCamera.position.lerpVectors(start, end, easeProgress)
+        currentControls.target.lerpVectors(startT, endT, easeProgress)
+        currentControls.update()
+        
+        if (progress < 1) {
+          requestAnimationFrame(animateCamera)
+        }
+      }
+      
+      // Start animation
+      animateCamera()
+    } else {
+      const preset = CAMERA_PRESETS[viewId as keyof typeof CAMERA_PRESETS]
+      if (!preset) return
+      
+      // Get current position and target
+      const startPos = cameraRef.current.position.clone()
+      const startTarget = controlsRef.current.target.clone()
+      const endPos = preset.position.clone()
+      const endTarget = preset.target.clone()
+      
+      // Animation duration in ms
+      const duration = 1000
+      const startTime = Date.now()
+      
+      // Animation function with locally scoped variables for safe closure
+      const animateCamera = () => {
+        // Safely ensure variables are available within this closure
+        const currentCamera = cameraRef.current
+        const currentControls = controlsRef.current
+        
+        if (!currentCamera || !currentControls) return
+        
+        // Use local references to prevent "not defined" errors
+        const start = startPos
+        const startT = startTarget
+        const end = endPos
+        const endT = endTarget
+        
+        const elapsed = Date.now() - startTime
+        const progress = Math.min(elapsed / duration, 1)
+        
+        // Ease function (ease-in-out)
+        const easeProgress = progress < 0.5 
+          ? 2 * progress * progress 
+          : -1 + (4 - 2 * progress) * progress
+        
+        // Update camera position and controls target
+        currentCamera.position.lerpVectors(start, end, easeProgress)
+        currentControls.target.lerpVectors(startT, endT, easeProgress)
+        currentControls.update()
+        
+        if (progress < 1) {
+          requestAnimationFrame(animateCamera)
+        }
+      }
+      
+      // Start animation
+      animateCamera()
+    }
   }
 
-  // Animation loop with enhanced effects
+  // Animate - simplified to avoid POV camera conflicts
   const animate = () => {
-    if (
-      !sceneRef.current ||
-      !cameraRef.current ||
-      !rendererRef.current ||
-      !labelRendererRef.current ||
-      !controlsRef.current
-    )
+    if (!sceneRef.current || !cameraRef.current || !rendererRef.current || !labelRendererRef.current) {
+      animationFrameRef.current = requestAnimationFrame(animate)
       return
-
-    // Rotate the central icosahedron
-    if (repoIcosahedronRef.current) {
-      repoIcosahedronRef.current.rotation.y += 0.003
-      repoIcosahedronRef.current.rotation.x += 0.001
     }
     
-    // Animate particles for ambient effect
-    if (particlesRef.current) {
-      const positions = particlesRef.current.geometry.attributes.position.array as Float32Array
-      const time = Date.now() * 0.0001
-      
-      for (let i = 0; i < PARTICLE_COUNT; i++) {
-        const i3 = i * 3
-        // Gentle wave motion based on position
-        positions[i3 + 1] += Math.sin(time + positions[i3] * 0.01) * 0.02
+    try {
+      // Simple animation of icosahedron
+      if (repoIcosahedronRef.current) {
+        repoIcosahedronRef.current.rotation.y += 0.002
       }
       
-      particlesRef.current.geometry.attributes.position.needsUpdate = true
-      particlesRef.current.rotation.y += 0.0003
+      // Gentle particle animation
+      if (particlesRef.current) {
+        particlesRef.current.rotation.y += 0.0001
+      }
+      
+      // Render the scene
+      rendererRef.current.render(sceneRef.current, cameraRef.current)
+      labelRendererRef.current.render(sceneRef.current, cameraRef.current)
+    } catch (error) {
+      console.error("Error in animation loop:", error)
     }
     
-    // Make the time ribbon gently pulse
-    if (timeRibbonRef.current) {
-      const time = Date.now() * 0.001
-      const material = timeRibbonRef.current.material as THREE.MeshStandardMaterial
-      material.emissive.setRGB(0.1 + Math.sin(time) * 0.05, 0.2 + Math.sin(time * 1.2) * 0.05, 0.5 + Math.sin(time * 0.8) * 0.05)
-    }
-
-    controlsRef.current.update() // Update orbit controls
-    rendererRef.current.render(sceneRef.current, cameraRef.current)
-    labelRendererRef.current.render(sceneRef.current, cameraRef.current) // Update CSS2D labels
-
     animationFrameRef.current = requestAnimationFrame(animate)
   }
 
@@ -1193,6 +1777,49 @@ export default function GitHubRepoVisualization({ repoData }: GitHubRepoVisualiz
     return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`
   }
 
-  return <div ref={containerRef} className="w-full h-screen" />
+  // Error display component
+  const renderError = () => {
+    if (!error) return null;
+    
+    return (
+      <div style={{
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        backgroundColor: 'rgba(200, 30, 30, 0.9)',
+        color: 'white',
+        padding: '20px',
+        borderRadius: '8px',
+        maxWidth: '400px',
+        textAlign: 'center',
+        zIndex: '1001'
+      }}>
+        <h3>Visualization Error</h3>
+        <p>{error}</p>
+        <button 
+          onClick={() => window.location.reload()}
+          style={{
+            backgroundColor: 'white',
+            color: '#c81e1e',
+            border: 'none',
+            padding: '8px 16px',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            marginTop: '10px',
+            fontWeight: 'bold'
+          }}
+        >
+          Reload
+        </button>
+      </div>
+    );
+  };
+
+  return (
+    <div ref={containerRef} className="w-full h-screen">
+      {renderError()}
+    </div>
+  );
 }
 
